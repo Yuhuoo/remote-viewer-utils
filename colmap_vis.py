@@ -20,6 +20,8 @@ def main(
     images_path: str,
     colmap_path: str, 
     downsample_factor: int = 4,
+    show_pcd: bool = True,
+    port: int = 8080,  # 新增端口参数
 ) -> None:
     """Visualize COLMAP sparse reconstruction outputs.
 
@@ -31,7 +33,7 @@ def main(
     images_path = Path(images_path)
     colmap_path = Path(colmap_path)
     
-    server = viser.ViserServer()
+    server = viser.ViserServer(port=port)
     server.configure_theme(titlebar_content=None, control_layout="collapsible")
 
     # Load the colmap info.
@@ -41,12 +43,15 @@ def main(
     except:
         cameras = read_cameras_text(colmap_path / "cameras.txt")
         images = read_images_text(colmap_path / "images.txt")
-    try:
-        points3d = read_points3d_binary(colmap_path / "points3D.bin")
-    except:
-        mesh = trimesh.load(colmap_path / "points3D.ply")
-        points3d = mesh.vertices 
-        colors3d = mesh.colors
+    
+    show_pcd = False
+    if show_pcd:
+        try:
+            points3d = read_points3d_binary(colmap_path / "points3D.bin")
+        except:
+            mesh = trimesh.load(colmap_path / "points3D.ply")
+            points3d = mesh.vertices 
+            colors3d = mesh.colors
     
     gui_reset_up = server.add_gui_button(
         "Reset up direction",
@@ -60,20 +65,22 @@ def main(
         client.camera.up_direction = tf.SO3(client.camera.wxyz) @ onp.array(
             [0.0, -1.0, 0.0]
         )
-
-    gui_points = server.add_gui_slider(
-        "Max points",
-        min=1,
-        max=len(points3d),
-        step=1,
-        initial_value=min(len(points3d), 50_000),
-    )
+        
+    if show_pcd:
+        gui_points = server.add_gui_slider(
+            "Max points",
+            min=1,
+            max=len(points3d),
+            step=1,
+            initial_value=min(len(points3d), 50_000),
+        )
+        
     gui_frames = server.add_gui_slider(
         "Max frames",
         min=1,
         max=len(images),
         step=1,
-        initial_value=min(len(images), 100),
+        initial_value=min(len(images), 300),
     )
     gui_point_size = server.add_gui_number("Point size", initial_value=0.0003)
     RTs = {}
@@ -111,8 +118,8 @@ def main(
                 f"/colmap/frame_{img_id}",
                 wxyz=T_world_camera.rotation().wxyz,
                 position=T_world_camera.translation(),
-                axes_length=0.1,
-                axes_radius=0.005,
+                axes_length=0.01,
+                axes_radius=0.0005,
             )
 
             # if cam.model != "PINHOLE":
@@ -126,7 +133,7 @@ def main(
                 f"/colmap/frame_{img_id}/frustum",
                 fov=2 * onp.arctan2(H / 2, fy),
                 aspect=W / H,
-                scale=0.05,
+                scale=0.02,
                 image=image,
             )
             attach_callback(frustum, frame)
@@ -138,44 +145,47 @@ def main(
         if load_images:
             set_image_frustums()
         """Send all COLMAP elements to viser for visualization"""
-        try:
-            points = onp.array([points3d[p_id].xyz for p_id in points3d])
-            colors = onp.array([points3d[p_id].rgb for p_id in points3d])
-            points_selection = onp.random.choice(
-                points.shape[0], gui_points.value, replace=False
-            )
-            points = points[points_selection]
-            colors = colors[points_selection]
+        if show_pcd:
+            try:
+                points = onp.array([points3d[p_id].xyz for p_id in points3d])
+                colors = onp.array([points3d[p_id].rgb for p_id in points3d])
+                points_selection = onp.random.choice(
+                    points.shape[0], gui_points.value, replace=False
+                )
+                points = points[points_selection]
+                colors = colors[points_selection]
 
-            server.add_point_cloud(
-                name="/colmap/pcd",
-                points=points,
-                colors=colors,
-                point_size=gui_point_size.value,
-            )
-        except:
-            server.add_point_cloud(
-                name="/colmap/pcd",
-                points=points3d,
-                colors=onp.array(colors3d)[:, :3],
-                point_size=gui_point_size.value,
-            )
+                server.add_point_cloud(
+                    name="/colmap/pcd",
+                    points=points,
+                    colors=colors,
+                    point_size=gui_point_size.value,
+                )
+            except:
+                server.add_point_cloud(
+                    name="/colmap/pcd",
+                    points=points3d,
+                    colors=onp.array(colors3d)[:, :3],
+                    point_size=gui_point_size.value,
+                )
     need_update = True
 
-    @gui_points.on_update
-    def _(_) -> None:
-        nonlocal need_update
-        need_update = True
+    if show_pcd:
+        @gui_points.on_update
+        def _(_) -> None:
+            nonlocal need_update
+            need_update = True
 
     @gui_frames.on_update
     def _(_) -> None:
         nonlocal need_update
         need_update = True
 
-    @gui_point_size.on_update
-    def _(_) -> None:
-        nonlocal need_update
-        need_update = True
+    if show_pcd:
+        @gui_point_size.on_update
+        def _(_) -> None:
+            nonlocal need_update
+            need_update = True
 
     server.reset_scene()
     visualize_colmap(True)
@@ -191,7 +201,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Process images and save results.')
     parser.add_argument('--image_dir', type=str, required=True, help='Directory containing images')
     parser.add_argument('--colmap_path', type=str, required=True, help='Path to the colmap model including vggsfm output and mast3r')
-    parser.add_argument('--downsample', type=int, default=4)
+    parser.add_argument('--downsample', type=int, default=1)
+    parser.add_argument('--showpcd', type=bool, default=True)
+    parser.add_argument('--port', type=int, default=8084, help='Port for the Viser server')
 
     args = parser.parse_args()
-    main(args.image_dir, args.colmap_path, args.downsample)
+    main(args.image_dir, args.colmap_path, args.downsample, args.showpcd, args.port)
